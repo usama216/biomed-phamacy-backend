@@ -785,6 +785,183 @@ app.delete('/api/products/:id', async (req, res) => {
   }
 });
 
+// ==================== BANNERS API ENDPOINTS ====================
+
+// Get all banners (for hero section)
+app.get('/api/banners', async (req, res) => {
+  try {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('banners')
+        .select('*')
+        .eq('is_active', true)
+        .order('order_index', { ascending: true });
+
+      if (error) {
+        console.error('Supabase error:', error);
+        return res.json({ banners: [] });
+      }
+
+      return res.json({ banners: data || [] });
+    } else {
+      return res.json({ banners: [] });
+    }
+  } catch (error) {
+    console.error('Error fetching banners:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get all banners (including inactive - for admin)
+app.get('/api/banners/all', async (req, res) => {
+  try {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('banners')
+        .select('*')
+        .order('order_index', { ascending: true });
+
+      if (error) {
+        console.error('Supabase error:', error);
+        return res.status(500).json({ error: 'Failed to fetch banners', details: error.message });
+      }
+
+      return res.json({ banners: data || [] });
+    } else {
+      return res.json({ banners: [] });
+    }
+  } catch (error) {
+    console.error('Error fetching banners:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Create a new banner
+app.post('/api/banners', async (req, res) => {
+  try {
+    const { image_url, title, subtitle, link, order_index, is_active } = req.body;
+
+    if (!image_url) {
+      return res.status(400).json({ error: 'Image URL is required' });
+    }
+
+    const newBanner = {
+      image_url,
+      title: title || null,
+      subtitle: subtitle || null,
+      link: link || null,
+      order_index: order_index !== undefined ? parseInt(order_index) : 0,
+      is_active: is_active !== undefined ? is_active : true
+    };
+
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('banners')
+        .insert([newBanner])
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Supabase error:', error);
+        return res.status(500).json({ error: 'Failed to create banner', details: error.message });
+      }
+
+      return res.status(201).json({ banner: data, message: 'Banner created successfully' });
+    } else {
+      return res.status(201).json({ banner: newBanner, message: 'Banner created successfully (not saved)' });
+    }
+  } catch (error) {
+    console.error('Error creating banner:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Update a banner
+app.put('/api/banners/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { image_url, title, subtitle, link, order_index, is_active } = req.body;
+
+    const updateData = {};
+    if (image_url !== undefined) updateData.image_url = image_url;
+    if (title !== undefined) updateData.title = title;
+    if (subtitle !== undefined) updateData.subtitle = subtitle;
+    if (link !== undefined) updateData.link = link;
+    if (order_index !== undefined) updateData.order_index = parseInt(order_index);
+    if (is_active !== undefined) updateData.is_active = is_active;
+
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('banners')
+        .update(updateData)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Supabase error:', error);
+        return res.status(500).json({ error: 'Failed to update banner', details: error.message });
+      }
+
+      if (!data) {
+        return res.status(404).json({ error: 'Banner not found' });
+      }
+
+      return res.json({ banner: data, message: 'Banner updated successfully' });
+    } else {
+      return res.json({ message: 'Banner updated successfully (not saved)' });
+    }
+  } catch (error) {
+    console.error('Error updating banner:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Delete a banner
+app.delete('/api/banners/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (supabase) {
+      // First, get the banner to delete the image from storage if needed
+      const { data: banner, error: fetchError } = await supabase
+        .from('banners')
+        .select('image_url')
+        .eq('id', id)
+        .single();
+
+      if (fetchError && fetchError.code !== 'PGRST116') {
+        console.error('Error fetching banner for deletion:', fetchError);
+      }
+
+      // Delete banner from database
+      const { error } = await supabase
+        .from('banners')
+        .delete()
+        .eq('id', id);
+
+      if (error) {
+        console.error('Supabase error:', error);
+        return res.status(500).json({ error: 'Failed to delete banner', details: error.message });
+      }
+
+      // Optionally delete image from storage (if it's in Supabase Storage)
+      if (banner && banner.image_url) {
+        await deleteFromSupabaseStorage(banner.image_url, 'products');
+      }
+
+      return res.json({ message: 'Banner deleted successfully' });
+    } else {
+      return res.json({ message: 'Banner deleted successfully (not saved)' });
+    }
+  } catch (error) {
+    console.error('Error deleting banner:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ==================== END BANNERS API ====================
+
 // Mock products data (fallback when Supabase is not configured or table doesn't exist)
 function getMockProducts() {
   return [
