@@ -243,60 +243,47 @@ app.get('/api/test', (req, res) => {
   });
 });
 
-// Helper function to check and create bucket if it doesn't exist
-async function ensureBucketExists(bucketName, isPublic = true) {
-  if (!supabase) {
-    throw new Error('Supabase is not configured');
-  }
-
+// Admin Login endpoint
+app.post('/api/auth/login', (req, res) => {
   try {
-    // Check if bucket exists by listing buckets
-    const { data: buckets, error: listError } = await supabase.storage.listBuckets();
-    
-    if (listError) {
-      console.error('Error listing buckets:', listError);
-      // If we can't list, try to create (might fail if it exists, which is ok)
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Email and password are required' 
+      });
+    }
+
+    // Valid admin credentials
+    const validEmail = 'biomedinnovationpharmaceutical@gmail.com';
+    const validPassword = 'Imran@216216';
+
+    // Check credentials
+    if (email === validEmail && password === validPassword) {
+      return res.json({ 
+        success: true, 
+        message: 'Login successful' 
+      });
     } else {
-      const bucketExists = buckets?.some(b => b.name === bucketName);
-      if (bucketExists) {
-        return true; // Bucket already exists
-      }
+      return res.status(401).json({ 
+        success: false, 
+        error: 'Invalid email or password' 
+      });
     }
-
-    // Try to create the bucket (will fail silently if it exists and we don't have permission to check)
-    const { data, error: createError } = await supabase.storage.createBucket(bucketName, {
-      public: isPublic,
-      allowedMimeTypes: null, // Allow all file types
-      fileSizeLimit: null // No size limit (or set appropriate limit)
-    });
-
-    if (createError) {
-      // If bucket creation fails, it might already exist (which is fine)
-      // Or we might not have permissions (user needs to create manually)
-      if (createError.message && createError.message.includes('already exists')) {
-        return true; // Bucket exists
-      }
-      throw new Error(`Failed to create bucket '${bucketName}'. Please create it manually in Supabase Dashboard. Error: ${createError.message}`);
-    }
-
-    return true;
   } catch (error) {
-    throw new Error(`Bucket '${bucketName}' not found. Please create it in Supabase Dashboard: Storage → New Bucket → Name: ${bucketName} → Public: ${isPublic}`);
+    console.error('Login error:', error);
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error' 
+    });
   }
-}
+});
 
 // Helper function to upload file to Supabase Storage
 async function uploadToSupabaseStorage(file, bucket, folder = '') {
   if (!supabase) {
     throw new Error('Supabase is not configured');
-  }
-
-  // Ensure bucket exists (will throw helpful error if it doesn't)
-  try {
-    await ensureBucketExists(bucket, true);
-  } catch (error) {
-    // Re-throw with helpful message
-    throw error;
   }
 
   const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -311,10 +298,25 @@ async function uploadToSupabaseStorage(file, bucket, folder = '') {
     });
 
   if (error) {
+    // Provide helpful error messages
     if (error.message && error.message.includes('Bucket not found')) {
-      throw new Error(`Bucket '${bucket}' not found. Please create it in Supabase Dashboard: Storage → New Bucket → Name: ${bucket} → Make it Public`);
+      throw new Error(`Bucket '${bucket}' not found. Please verify:
+1. Bucket exists in Supabase Dashboard → Storage
+2. Bucket name is exactly: ${bucket} (case-sensitive)
+3. If using Anon Key, make sure storage policies are set
+4. If bucket exists, try using SUPABASE_SERVICE_ROLE_KEY in .env file`);
     }
-    throw error;
+    
+    // Handle permission errors
+    if (error.message && (error.message.includes('permission') || error.message.includes('policy'))) {
+      throw new Error(`Permission denied. Please check:
+1. Storage policies are set for the '${bucket}' bucket
+2. Or use SUPABASE_SERVICE_ROLE_KEY instead of SUPABASE_ANON_KEY
+3. Service Role Key can be found in: Supabase Dashboard → Settings → API → service_role key`);
+    }
+    
+    // Generic error
+    throw new Error(`Upload failed: ${error.message}`);
   }
 
   // Get public URL
