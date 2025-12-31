@@ -10,13 +10,35 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Create uploads directories if they don't exist
-const uploadsDir = path.join(__dirname, 'uploads', 'products');
-const videosDir = path.join(__dirname, 'uploads', 'videos');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-if (!fs.existsSync(videosDir)) {
-  fs.mkdirSync(videosDir, { recursive: true });
+// On Vercel, use 'temp' folder (must exist in repo)
+// For local development, use 'uploads' folder
+const isVercel = process.env.VERCEL === '1' || process.env.VERCEL_ENV;
+const baseDir = isVercel ? path.join(__dirname, 'temp') : path.join(__dirname, 'uploads');
+
+const uploadsDir = path.join(baseDir, 'products');
+const videosDir = path.join(baseDir, 'videos');
+
+// Create directories with error handling (won't fail if it can't create)
+// On serverless platforms, directory creation may fail - that's okay for GET endpoints
+try {
+  // Ensure base directory exists
+  if (!fs.existsSync(baseDir)) {
+    fs.mkdirSync(baseDir, { recursive: true });
+  }
+  
+  // Create subdirectories
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+  if (!fs.existsSync(videosDir)) {
+    fs.mkdirSync(videosDir, { recursive: true });
+  }
+} catch (error) {
+  // Silently handle - GET endpoints don't need upload directories
+  // Only log in development
+  if (!isVercel) {
+    console.warn('Could not create upload directories:', error.message);
+  }
 }
 
 // Configure multer for image uploads
@@ -92,7 +114,9 @@ app.use(cors());
 app.use(express.json());
 
 // Serve uploaded files statically
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// On Vercel, serve from 'temp' folder, locally serve from 'uploads' folder
+const staticBaseDir = isVercel ? path.join(__dirname, 'temp') : path.join(__dirname, 'uploads');
+app.use('/uploads', express.static(staticBaseDir));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
