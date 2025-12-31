@@ -209,6 +209,25 @@ app.post('/api/upload/images', imageUpload.array('images', 10), (req, res) => {
   }
 });
 
+// Upload video
+app.post('/api/upload/video', videoUpload.single('video'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No video file provided' });
+    }
+
+    const videoUrl = `/uploads/videos/${req.file.filename}`;
+    res.json({
+      message: 'Video uploaded successfully',
+      videoUrl: videoUrl,
+      filename: req.file.filename
+    });
+  } catch (error) {
+    console.error('Error uploading video:', error);
+    res.status(500).json({ error: 'Error uploading video', details: error.message });
+  }
+});
+
 // Get all products
 app.get('/api/products', async (req, res) => {
   try {
