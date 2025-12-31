@@ -1,10 +1,79 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Create uploads directories if they don't exist
+const uploadsDir = path.join(__dirname, 'uploads', 'products');
+const videosDir = path.join(__dirname, 'uploads', 'videos');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+if (!fs.existsSync(videosDir)) {
+  fs.mkdirSync(videosDir, { recursive: true });
+}
+
+// Configure multer for image uploads
+const imageStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadsDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'product-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const imageFileFilter = (req, file, cb) => {
+  // Accept only images
+  if (file.mimetype.startsWith('image/')) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only image files are allowed!'), false);
+  }
+};
+
+const imageUpload = multer({
+  storage: imageStorage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit
+  },
+  fileFilter: imageFileFilter
+});
+
+// Configure multer for video uploads
+const videoStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, videosDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'video-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const videoFileFilter = (req, file, cb) => {
+  // Accept only videos
+  if (file.mimetype.startsWith('video/')) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only video files are allowed!'), false);
+  }
+};
+
+const videoUpload = multer({
+  storage: videoStorage,
+  limits: {
+    fileSize: 50 * 1024 * 1024 // 50MB limit for videos
+  },
+  fileFilter: videoFileFilter
+});
 
 // Initialize Supabase client
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -21,6 +90,9 @@ if (supabaseUrl && supabaseKey) {
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Serve uploaded files statically
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -41,6 +113,47 @@ app.get('/api/test', (req, res) => {
       timestamp: new Date().toISOString()
     }
   });
+});
+
+// Upload single image
+app.post('/api/upload/image', imageUpload.single('image'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image file provided' });
+    }
+
+    const imageUrl = `/uploads/products/${req.file.filename}`;
+    res.json({
+      message: 'Image uploaded successfully',
+      imageUrl: imageUrl,
+      filename: req.file.filename
+    });
+  } catch (error) {
+    console.error('Error uploading image:', error);
+    res.status(500).json({ error: 'Error uploading image', details: error.message });
+  }
+});
+
+// Upload multiple images
+app.post('/api/upload/images', imageUpload.array('images', 10), (req, res) => {
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'No image files provided' });
+    }
+
+    const imageUrls = req.files.map(file => ({
+      url: `/uploads/products/${file.filename}`,
+      filename: file.filename
+    }));
+
+    res.json({
+      message: 'Images uploaded successfully',
+      images: imageUrls
+    });
+  } catch (error) {
+    console.error('Error uploading images:', error);
+    res.status(500).json({ error: 'Error uploading images', details: error.message });
+  }
 });
 
 // Get all products
@@ -111,25 +224,91 @@ app.get('/api/products/:id', async (req, res) => {
   }
 });
 
+// Helper function to generate unique auto-incremented product ID
+async function generateProductId() {
+  try {
+    if (supabase) {
+      // Get all products to find the highest ID
+      const { data, error } = await supabase
+        .from('products')
+        .select('id');
+
+      if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned
+        console.error('Error fetching products for ID generation:', error);
+        // Fallback to timestamp-based ID
+        return `prod-${Date.now()}`;
+      }
+
+      if (data && data.length > 0) {
+        // Extract numbers from all IDs and find the maximum
+        let maxNumber = 0;
+        data.forEach(product => {
+          const match = product.id.match(/^prod-(\d+)$/);
+          if (match) {
+            const num = parseInt(match[1], 10);
+            if (num > maxNumber) {
+              maxNumber = num;
+            }
+          }
+        });
+        
+        if (maxNumber > 0) {
+          return `prod-${maxNumber + 1}`;
+        }
+      }
+      // If no products exist or format doesn't match, start from 1
+      return 'prod-1';
+    } else {
+      // For development without Supabase, use timestamp
+      return `prod-${Date.now()}`;
+    }
+  } catch (error) {
+    console.error('Error generating product ID:', error);
+    // Fallback to timestamp-based ID
+    return `prod-${Date.now()}`;
+  }
+}
+
 // Create a new product (POST)
 app.post('/api/products', async (req, res) => {
   try {
-    const { id, name, rating, reviews, originalPrice, discountedPrice, image, description, inStock } = req.body;
+    const { 
+      name, rating, reviews, questions, originalPrice, discountedPrice, 
+      image, images, video, packSize, wellnessCoins,
+      description, helps, details, directions, ingredients,
+      inStock 
+    } = req.body;
 
     // Validation
     if (!name || !originalPrice || !discountedPrice) {
       return res.status(400).json({ error: 'Name, originalPrice, and discountedPrice are required' });
     }
 
+    // Generate auto-increment unique ID
+    const productId = await generateProductId();
+
+    // Handle images - support both single image (backward compatibility) and images array
+    const imageArray = images && Array.isArray(images) ? images : (image ? [image] : []);
+    const mainImage = image || (imageArray.length > 0 ? imageArray[0] : '');
+
     const newProduct = {
-      id: id || `prod-${Date.now()}`,
+      id: productId,
       name,
-      rating: rating || 0,
-      reviews: reviews || 0,
+      rating: rating ? parseFloat(rating) : 0,
+      reviews: reviews ? parseInt(reviews) : 0,
+      questions: questions ? parseInt(questions) : 0,
       originalPrice: parseFloat(originalPrice),
       discountedPrice: parseFloat(discountedPrice),
-      image: image || '',
+      image: mainImage, // Main image for backward compatibility
+      images: imageArray, // Array of images
+      video: video || null, // Video URL (optional)
+      packSize: packSize || null,
+      wellnessCoins: wellnessCoins ? parseFloat(wellnessCoins) : null,
       description: description || '',
+      helps: helps && Array.isArray(helps) ? helps : null,
+      details: details || null,
+      directions: directions || null,
+      ingredients: ingredients && Array.isArray(ingredients) ? ingredients : null,
       inStock: inStock !== undefined ? inStock : true
     };
 
@@ -142,6 +321,7 @@ app.post('/api/products', async (req, res) => {
 
       if (error) {
         console.error('Supabase error:', error);
+        console.error('Product data:', JSON.stringify(newProduct, null, 2));
         return res.status(500).json({ error: 'Failed to create product', details: error.message });
       }
 
@@ -161,16 +341,41 @@ app.post('/api/products', async (req, res) => {
 app.put('/api/products/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, rating, reviews, originalPrice, discountedPrice, image, description, inStock } = req.body;
+    const { 
+      name, rating, reviews, questions, originalPrice, discountedPrice, 
+      image, images, video, packSize, wellnessCoins,
+      description, helps, details, directions, ingredients,
+      inStock 
+    } = req.body;
 
     const updateData = {};
     if (name) updateData.name = name;
     if (rating !== undefined) updateData.rating = parseFloat(rating);
     if (reviews !== undefined) updateData.reviews = parseInt(reviews);
+    if (questions !== undefined) updateData.questions = parseInt(questions);
     if (originalPrice !== undefined) updateData.originalPrice = parseFloat(originalPrice);
     if (discountedPrice !== undefined) updateData.discountedPrice = parseFloat(discountedPrice);
-    if (image !== undefined) updateData.image = image;
+    
+    // Handle images
+    if (images !== undefined && Array.isArray(images)) {
+      updateData.images = images;
+      updateData.image = images.length > 0 ? images[0] : '';
+    } else if (image !== undefined) {
+      updateData.image = image;
+      if (!updateData.images) {
+        updateData.images = image ? [image] : [];
+      }
+    }
+    
+    // Handle video (optional)
+    if (video !== undefined) updateData.video = video || null;
+    if (packSize !== undefined) updateData.packSize = packSize || null;
+    if (wellnessCoins !== undefined) updateData.wellnessCoins = wellnessCoins ? parseFloat(wellnessCoins) : null;
     if (description !== undefined) updateData.description = description;
+    if (helps !== undefined) updateData.helps = helps && Array.isArray(helps) ? helps : null;
+    if (details !== undefined) updateData.details = details || null;
+    if (directions !== undefined) updateData.directions = directions || null;
+    if (ingredients !== undefined) updateData.ingredients = ingredients && Array.isArray(ingredients) ? ingredients : null;
     if (inStock !== undefined) updateData.inStock = inStock;
 
     if (supabase) {

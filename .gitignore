@@ -22,3 +22,6 @@ Thumbs.db
 *.swp
 *.swo
 
+# Uploaded files (keep structure but ignore files)
+uploads/
+!uploads/.gitkeep
