@@ -39,24 +39,8 @@ try {
   console.warn('File uploads may not work on this platform');
 }
 
-// Configure multer for image uploads
-const imageStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    // Ensure directory exists before saving file
-    try {
-      if (!fs.existsSync(uploadsDir)) {
-        fs.mkdirSync(uploadsDir, { recursive: true });
-      }
-      cb(null, uploadsDir);
-    } catch (error) {
-      cb(error, null);
-    }
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, 'product-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
+// Configure multer for image uploads (using memory storage for Supabase Storage)
+const imageStorage = multer.memoryStorage();
 
 const imageFileFilter = (req, file, cb) => {
   // Accept only images
@@ -75,24 +59,8 @@ const imageUpload = multer({
   fileFilter: imageFileFilter
 });
 
-// Configure multer for video uploads
-const videoStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    // Ensure directory exists before saving file
-    try {
-      if (!fs.existsSync(videosDir)) {
-        fs.mkdirSync(videosDir, { recursive: true });
-      }
-      cb(null, videosDir);
-    } catch (error) {
-      cb(error, null);
-    }
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, 'video-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
+// Configure multer for video uploads (using memory storage for Supabase Storage)
+const videoStorage = multer.memoryStorage();
 
 const videoFileFilter = (req, file, cb) => {
   // Accept only videos
@@ -114,10 +82,13 @@ const videoUpload = multer({
 // Initialize Supabase client
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
+// Use service role key for storage operations if available (has admin access), otherwise use anon key
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
 
 let supabase = null;
 if (supabaseUrl && supabaseKey) {
-  supabase = createClient(supabaseUrl, supabaseKey);
+  // Use service role key for server-side operations (has admin access to storage)
+  supabase = createClient(supabaseUrl, supabaseServiceKey);
   console.log('✓ Supabase client initialized');
 } else {
   console.log('⚠ Supabase credentials not found. API will work without database.');
@@ -127,25 +98,129 @@ if (supabaseUrl && supabaseKey) {
 app.use(cors());
 app.use(express.json());
 
-// Serve uploaded files statically
-// On Vercel: serve static files from 'temp' folder (pre-existing files in repo)
-//            uploaded files go to /tmp but won't be served (Vercel limitation)
-// Locally: serve from 'uploads' folder
-app.use('/uploads', express.static(staticBaseDir));
-
-// On Vercel, also try to serve from /tmp (for recently uploaded files, but they won't persist)
-if (isVercel) {
+// Dynamic video serving endpoint for Vercel (files in /tmp)
+// IMPORTANT: Place this BEFORE static middleware so it gets checked first
+// This allows serving videos uploaded to /tmp on Vercel
+app.get('/uploads/videos/:filename', (req, res) => {
   try {
-    if (fs.existsSync('/tmp/products')) {
-      app.use('/uploads/products', express.static('/tmp/products'));
+    const filename = req.params.filename;
+    
+    // On Vercel, check /tmp/videos first, then fallback to temp folder
+    const videoPaths = [];
+    if (isVercel) {
+      videoPaths.push(path.join('/tmp/videos', filename));
     }
-    if (fs.existsSync('/tmp/videos')) {
-      app.use('/uploads/videos', express.static('/tmp/videos'));
+    videoPaths.push(path.join(staticBaseDir, 'videos', filename));
+    
+    // Try to find the video file
+    let videoPath = null;
+    for (const testPath of videoPaths) {
+      try {
+        if (fs.existsSync(testPath)) {
+          videoPath = testPath;
+          break;
+        }
+      } catch (err) {
+        // Continue to next path
+        continue;
+      }
+    }
+    
+    if (!videoPath) {
+      return res.status(404).json({ error: 'Video not found' });
+    }
+    
+    // Get file stats
+    const stat = fs.statSync(videoPath);
+    const fileSize = stat.size;
+    const range = req.headers.range;
+    
+    if (range) {
+      // Handle range requests for video streaming
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const chunksize = (end - start) + 1;
+      const file = fs.createReadStream(videoPath, { start, end });
+      const head = {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': 'video/mp4',
+      };
+      res.writeHead(206, head);
+      file.pipe(res);
+    } else {
+      // Send entire file
+      const head = {
+        'Content-Length': fileSize,
+        'Content-Type': 'video/mp4',
+      };
+      res.writeHead(200, head);
+      fs.createReadStream(videoPath).pipe(res);
     }
   } catch (error) {
-    // Ignore - static serving from /tmp may not always work
+    console.error('Error serving video:', error);
+    res.status(500).json({ error: 'Error serving video', details: error.message });
   }
-}
+});
+
+// Dynamic image serving endpoint for Vercel (files in /tmp)
+// IMPORTANT: Place this BEFORE static middleware so it gets checked first
+app.get('/uploads/products/:filename', (req, res, next) => {
+  try {
+    const filename = req.params.filename;
+    
+    // On Vercel, check /tmp/products first, then fallback to temp folder
+    const imagePaths = [];
+    if (isVercel) {
+      imagePaths.push(path.join('/tmp/products', filename));
+    }
+    imagePaths.push(path.join(staticBaseDir, 'products', filename));
+    
+    // Try to find the image file
+    let imagePath = null;
+    for (const testPath of imagePaths) {
+      try {
+        if (fs.existsSync(testPath)) {
+          imagePath = testPath;
+          break;
+        }
+      } catch (err) {
+        // Continue to next path
+        continue;
+      }
+    }
+    
+    if (!imagePath) {
+      // If not found, continue to static middleware (next())
+      return next();
+    }
+    
+    // Determine content type based on file extension
+    const ext = path.extname(filename).toLowerCase();
+    const contentTypeMap = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp'
+    };
+    const contentType = contentTypeMap[ext] || 'image/jpeg';
+    
+    res.setHeader('Content-Type', contentType);
+    fs.createReadStream(imagePath).pipe(res);
+  } catch (error) {
+    console.error('Error serving image:', error);
+    // Continue to static middleware on error
+    next();
+  }
+});
+
+// Serve uploaded files statically (fallback for files in temp folder)
+// On Vercel: serve static files from 'temp' folder (pre-existing files in repo)
+// Locally: serve from 'uploads' folder
+app.use('/uploads', express.static(staticBaseDir));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -168,18 +243,120 @@ app.get('/api/test', (req, res) => {
   });
 });
 
+// Helper function to upload file to Supabase Storage
+async function uploadToSupabaseStorage(file, bucket, folder = '') {
+  if (!supabase) {
+    throw new Error('Supabase is not configured');
+  }
+
+  const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+  const fileExt = path.extname(file.originalname);
+  const fileName = folder ? `${folder}/${uniqueSuffix}${fileExt}` : `${uniqueSuffix}${fileExt}`;
+  
+  const { data, error } = await supabase.storage
+    .from(bucket)
+    .upload(fileName, file.buffer, {
+      contentType: file.mimetype,
+      upsert: false
+    });
+
+  if (error) {
+    throw error;
+  }
+
+  // Get public URL
+  const { data: urlData } = supabase.storage
+    .from(bucket)
+    .getPublicUrl(data.path);
+
+  return {
+    path: data.path,
+    publicUrl: urlData.publicUrl,
+    fileName: fileName
+  };
+}
+
+// Helper function to delete file from Supabase Storage
+async function deleteFromSupabaseStorage(filePath, bucket) {
+  if (!supabase || !filePath) {
+    return;
+  }
+
+  try {
+    // Extract path from URL if it's a full URL
+    // Supabase Storage URLs format: https://{project}.supabase.co/storage/v1/object/public/{bucket}/{path}
+    let pathToDelete = filePath;
+    
+    if (filePath.includes('/storage/v1/object/public/')) {
+      // Extract path after bucket name
+      const parts = filePath.split('/storage/v1/object/public/');
+      if (parts.length > 1) {
+        const afterPublic = parts[1];
+        // Remove bucket name and leading slash
+        const pathParts = afterPublic.split('/');
+        if (pathParts[0] === bucket) {
+          pathToDelete = pathParts.slice(1).join('/');
+        } else {
+          pathToDelete = afterPublic; // If bucket doesn't match, use as is
+        }
+      }
+    } else if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
+      // Handle other URL formats - extract path from URL
+      try {
+        const url = new URL(filePath);
+        pathToDelete = url.pathname.replace(`/storage/v1/object/public/${bucket}/`, '');
+      } catch (e) {
+        console.error('Error parsing URL:', e);
+        return;
+      }
+    } else if (filePath.startsWith('/')) {
+      // Remove leading slash if it's just a path
+      pathToDelete = filePath.substring(1);
+    }
+
+    // Remove bucket prefix if present
+    if (pathToDelete.startsWith(`${bucket}/`)) {
+      pathToDelete = pathToDelete.substring(bucket.length + 1);
+    }
+
+    if (!pathToDelete || pathToDelete.trim() === '') {
+      console.warn('Empty path to delete, skipping');
+      return;
+    }
+
+    const { error } = await supabase.storage
+      .from(bucket)
+      .remove([pathToDelete]);
+
+    if (error) {
+      console.error('Error deleting file from Supabase Storage:', error);
+    } else {
+      console.log(`Successfully deleted file from storage: ${pathToDelete}`);
+    }
+  } catch (error) {
+    console.error('Error deleting file from Supabase Storage:', error);
+  }
+}
+
 // Upload single image
-app.post('/api/upload/image', imageUpload.single('image'), (req, res) => {
+app.post('/api/upload/image', imageUpload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No image file provided' });
     }
 
-    const imageUrl = `/uploads/products/${req.file.filename}`;
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase is not configured' });
+    }
+
+    // Upload to Supabase Storage
+    const uploadResult = await uploadToSupabaseStorage(req.file, 'products', 'images');
+    
     res.json({
       message: 'Image uploaded successfully',
-      imageUrl: imageUrl,
-      filename: req.file.filename
+      imageUrl: uploadResult.publicUrl,
+      filename: uploadResult.fileName,
+      path: uploadResult.path
     });
   } catch (error) {
     console.error('Error uploading image:', error);
@@ -188,15 +365,24 @@ app.post('/api/upload/image', imageUpload.single('image'), (req, res) => {
 });
 
 // Upload multiple images
-app.post('/api/upload/images', imageUpload.array('images', 10), (req, res) => {
+app.post('/api/upload/images', imageUpload.array('images', 10), async (req, res) => {
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No image files provided' });
     }
 
-    const imageUrls = req.files.map(file => ({
-      url: `/uploads/products/${file.filename}`,
-      filename: file.filename
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase is not configured' });
+    }
+
+    // Upload all images to Supabase Storage
+    const uploadPromises = req.files.map(file => uploadToSupabaseStorage(file, 'products', 'images'));
+    const uploadResults = await Promise.all(uploadPromises);
+
+    const imageUrls = uploadResults.map(result => ({
+      url: result.publicUrl,
+      filename: result.fileName,
+      path: result.path
     }));
 
     res.json({
@@ -210,17 +396,24 @@ app.post('/api/upload/images', imageUpload.array('images', 10), (req, res) => {
 });
 
 // Upload video
-app.post('/api/upload/video', videoUpload.single('video'), (req, res) => {
+app.post('/api/upload/video', videoUpload.single('video'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No video file provided' });
     }
 
-    const videoUrl = `/uploads/videos/${req.file.filename}`;
+    if (!supabase) {
+      return res.status(500).json({ error: 'Supabase is not configured' });
+    }
+
+    // Upload to Supabase Storage
+    const uploadResult = await uploadToSupabaseStorage(req.file, 'products', 'videos');
+    
     res.json({
       message: 'Video uploaded successfully',
-      videoUrl: videoUrl,
-      filename: req.file.filename
+      videoUrl: uploadResult.publicUrl,
+      filename: uploadResult.fileName,
+      path: uploadResult.path
     });
   } catch (error) {
     console.error('Error uploading video:', error);
@@ -484,6 +677,38 @@ app.delete('/api/products/:id', async (req, res) => {
     const { id } = req.params;
 
     if (supabase) {
+      // First, fetch the product to get image and video paths
+      const { data: product, error: fetchError } = await supabase
+        .from('products')
+        .select('image, images, video')
+        .eq('id', id)
+        .single();
+
+      if (fetchError && fetchError.code !== 'PGRST116') {
+        console.error('Error fetching product for deletion:', fetchError);
+      }
+
+      // Delete files from Supabase Storage if product exists
+      if (product) {
+        // Delete main image
+        if (product.image) {
+          await deleteFromSupabaseStorage(product.image, 'products');
+        }
+
+        // Delete images array
+        if (product.images && Array.isArray(product.images)) {
+          for (const imageUrl of product.images) {
+            await deleteFromSupabaseStorage(imageUrl, 'products');
+          }
+        }
+
+        // Delete video
+        if (product.video) {
+          await deleteFromSupabaseStorage(product.video, 'products');
+        }
+      }
+
+      // Delete product from database
       const { error } = await supabase
         .from('products')
         .delete()
