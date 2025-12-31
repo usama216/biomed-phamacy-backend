@@ -243,10 +243,60 @@ app.get('/api/test', (req, res) => {
   });
 });
 
+// Helper function to check and create bucket if it doesn't exist
+async function ensureBucketExists(bucketName, isPublic = true) {
+  if (!supabase) {
+    throw new Error('Supabase is not configured');
+  }
+
+  try {
+    // Check if bucket exists by listing buckets
+    const { data: buckets, error: listError } = await supabase.storage.listBuckets();
+    
+    if (listError) {
+      console.error('Error listing buckets:', listError);
+      // If we can't list, try to create (might fail if it exists, which is ok)
+    } else {
+      const bucketExists = buckets?.some(b => b.name === bucketName);
+      if (bucketExists) {
+        return true; // Bucket already exists
+      }
+    }
+
+    // Try to create the bucket (will fail silently if it exists and we don't have permission to check)
+    const { data, error: createError } = await supabase.storage.createBucket(bucketName, {
+      public: isPublic,
+      allowedMimeTypes: null, // Allow all file types
+      fileSizeLimit: null // No size limit (or set appropriate limit)
+    });
+
+    if (createError) {
+      // If bucket creation fails, it might already exist (which is fine)
+      // Or we might not have permissions (user needs to create manually)
+      if (createError.message && createError.message.includes('already exists')) {
+        return true; // Bucket exists
+      }
+      throw new Error(`Failed to create bucket '${bucketName}'. Please create it manually in Supabase Dashboard. Error: ${createError.message}`);
+    }
+
+    return true;
+  } catch (error) {
+    throw new Error(`Bucket '${bucketName}' not found. Please create it in Supabase Dashboard: Storage → New Bucket → Name: ${bucketName} → Public: ${isPublic}`);
+  }
+}
+
 // Helper function to upload file to Supabase Storage
 async function uploadToSupabaseStorage(file, bucket, folder = '') {
   if (!supabase) {
     throw new Error('Supabase is not configured');
+  }
+
+  // Ensure bucket exists (will throw helpful error if it doesn't)
+  try {
+    await ensureBucketExists(bucket, true);
+  } catch (error) {
+    // Re-throw with helpful message
+    throw error;
   }
 
   const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -261,6 +311,9 @@ async function uploadToSupabaseStorage(file, bucket, folder = '') {
     });
 
   if (error) {
+    if (error.message && error.message.includes('Bucket not found')) {
+      throw new Error(`Bucket '${bucket}' not found. Please create it in Supabase Dashboard: Storage → New Bucket → Name: ${bucket} → Make it Public`);
+    }
     throw error;
   }
 
