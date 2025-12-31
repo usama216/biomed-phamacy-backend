@@ -10,23 +10,23 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Create uploads directories if they don't exist
-// On Vercel, use 'temp' folder (must exist in repo)
+// IMPORTANT: On Vercel, filesystem is READ-ONLY except for /tmp
+// So we MUST use /tmp for uploads on Vercel (files won't persist between invocations)
 // For local development, use 'uploads' folder
+// Static files can be served from 'temp' folder (read-only, from repo)
 const isVercel = process.env.VERCEL === '1' || process.env.VERCEL_ENV;
-const baseDir = isVercel ? path.join(__dirname, 'temp') : path.join(__dirname, 'uploads');
 
-const uploadsDir = path.join(baseDir, 'products');
-const videosDir = path.join(baseDir, 'videos');
+// For uploads: use /tmp on Vercel, uploads folder locally
+const uploadBaseDir = isVercel ? '/tmp' : path.join(__dirname, 'uploads');
+const uploadsDir = path.join(uploadBaseDir, 'products');
+const videosDir = path.join(uploadBaseDir, 'videos');
 
-// Create directories with error handling (won't fail if it can't create)
-// On serverless platforms, directory creation may fail - that's okay for GET endpoints
+// For static file serving: use temp folder on Vercel (read-only from repo), uploads locally
+const staticBaseDir = isVercel ? path.join(__dirname, 'temp') : path.join(__dirname, 'uploads');
+
+// Create upload directories with error handling
 try {
-  // Ensure base directory exists
-  if (!fs.existsSync(baseDir)) {
-    fs.mkdirSync(baseDir, { recursive: true });
-  }
-  
-  // Create subdirectories
+  // Create subdirectories in upload location
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
   }
@@ -34,17 +34,23 @@ try {
     fs.mkdirSync(videosDir, { recursive: true });
   }
 } catch (error) {
-  // Silently handle - GET endpoints don't need upload directories
-  // Only log in development
-  if (!isVercel) {
-    console.warn('Could not create upload directories:', error.message);
-  }
+  // Log error for debugging
+  console.error('Could not create upload directories:', error.message);
+  console.warn('File uploads may not work on this platform');
 }
 
 // Configure multer for image uploads
 const imageStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, uploadsDir);
+    // Ensure directory exists before saving file
+    try {
+      if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+      }
+      cb(null, uploadsDir);
+    } catch (error) {
+      cb(error, null);
+    }
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -72,7 +78,15 @@ const imageUpload = multer({
 // Configure multer for video uploads
 const videoStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, videosDir);
+    // Ensure directory exists before saving file
+    try {
+      if (!fs.existsSync(videosDir)) {
+        fs.mkdirSync(videosDir, { recursive: true });
+      }
+      cb(null, videosDir);
+    } catch (error) {
+      cb(error, null);
+    }
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -114,9 +128,24 @@ app.use(cors());
 app.use(express.json());
 
 // Serve uploaded files statically
-// On Vercel, serve from 'temp' folder, locally serve from 'uploads' folder
-const staticBaseDir = isVercel ? path.join(__dirname, 'temp') : path.join(__dirname, 'uploads');
+// On Vercel: serve static files from 'temp' folder (pre-existing files in repo)
+//            uploaded files go to /tmp but won't be served (Vercel limitation)
+// Locally: serve from 'uploads' folder
 app.use('/uploads', express.static(staticBaseDir));
+
+// On Vercel, also try to serve from /tmp (for recently uploaded files, but they won't persist)
+if (isVercel) {
+  try {
+    if (fs.existsSync('/tmp/products')) {
+      app.use('/uploads/products', express.static('/tmp/products'));
+    }
+    if (fs.existsSync('/tmp/videos')) {
+      app.use('/uploads/videos', express.static('/tmp/videos'));
+    }
+  } catch (error) {
+    // Ignore - static serving from /tmp may not always work
+  }
+}
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
